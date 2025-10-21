@@ -35,7 +35,7 @@ function App() {
     setIsLoading(true)
 
     try {
-      const response = await axios.post('http://localhost:8000/api/chat', {
+      const response = await axios.post('https://chatbot-is1s.onrender.com/api/chat', {
         message: userMessage,
         session_id: 'default'
       })
@@ -57,7 +57,7 @@ function App() {
 
   const handleReset = async () => {
     try {
-      await axios.post('http://localhost:8000/api/reset?session_id=default')
+      await axios.post('https://chatbot-is1s.onrender.com/api/reset?session_id=default')
       setMessages([
         {
           role: 'assistant',
