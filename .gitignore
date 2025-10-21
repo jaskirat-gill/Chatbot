@@ -1,0 +1,25 @@
+# Backend
+backend/__pycache__/
+backend/*.py[cod]
+backend/venv/
+backend/.venv/
+backend/.env
+backend/chroma_db/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
