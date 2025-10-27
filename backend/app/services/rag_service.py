@@ -46,7 +46,7 @@ def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig
 
         # Create embeddings
         embeddings = HuggingFaceEmbeddings(
-            model_name="intfloat/multilingual-e5-large",
+            model_name="BAAI/bge-small-en-v1.5",
             model_kwargs={'device': 'cpu'}
         )
 
