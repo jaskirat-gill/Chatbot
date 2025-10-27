@@ -10,8 +10,9 @@ console.log('Tenant ID:', tenantId)
 const primaryColor = script?.getAttribute('data-primary-color') || '#007bff'
 const secondaryColor = script?.getAttribute('data-secondary-color') || '#ffffff'
 const apiUrl = script?.getAttribute('data-api-url') || 'http://localhost:8000'
+const companyName = script?.getAttribute('data-company-name') || 'Company'
 
-const config = { tenantId, primaryColor, secondaryColor, apiUrl }
+const config = { tenantId, primaryColor, secondaryColor, apiUrl, companyName }
 console.log('Config:', config)
 
 // Inject the widget into the page

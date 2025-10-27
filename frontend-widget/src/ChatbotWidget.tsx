@@ -6,6 +6,7 @@ interface Config {
     primaryColor: string
     secondaryColor: string
     apiUrl: string
+    companyName: string
 }
 
 interface Message {
@@ -18,7 +19,7 @@ const ChatbotWidget: React.FC<{ config: Config }> = ({ config }) => {
     const [messages, setMessages] = useState<Message[]>([
         {
             role: 'assistant',
-            content: 'Hi! I\'m the JD AI Marketing Solutions assistant. How can I help you today?'
+            content: `Hi! I'm the ${config.companyName} assistant. How can I help you today?`
         }
     ])
     const [input, setInput] = useState('')
@@ -136,8 +137,7 @@ const ChatbotWidget: React.FC<{ config: Config }> = ({ config }) => {
                             boxShadow: '0 2px 10px rgba(0,0,0,0.1)'
                         }}
                     >
-                        <span>🤖</span>
-                        JD AI Chat Assistant
+                        {config.companyName} Chat Assistant
                     </div>
 
                     {/* Messages */}
