@@ -1,35 +1,36 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from ..models.chat import ChatMessage, ChatResponse
 from ..services import rag_service
 
 router = APIRouter()
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(message: ChatMessage):
+async def chat(message: ChatMessage, tenant_id: str = Header(alias="X-Tenant-ID")):
     """
     Chat endpoint that processes user messages and returns AI responses.
     Uses RAG to provide context-aware answers about JD AI Marketing Solutions.
     """
-    if not rag_service.conversation_chain or not rag_service.vectorstore:
-        raise HTTPException(
-            status_code=503,
-            detail="RAG system not initialized. Please check server logs and ensure OPENAI_API_KEY is set."
-        )
+    try:
+        rag = rag_service.get_tenant_rag(tenant_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     try:
         # Get or create chat history for this session
-        if message.session_id not in rag_service.chat_history:
-            rag_service.chat_history[message.session_id] = []
+        if message.session_id not in rag["chat_history"]:
+            rag["chat_history"][message.session_id] = []
 
         # Query the conversation chain
-        result = rag_service.conversation_chain.invoke(message.message)
+        result = rag["conversation_chain"].invoke(message.message)
 
         # Update chat history
-        rag_service.chat_history[message.session_id].append((message.message, result))
+        rag["chat_history"][message.session_id].append((message.message, result))
 
         # Keep only last 10 exchanges to manage memory
-        if len(rag_service.chat_history[message.session_id]) > 10:
-            rag_service.chat_history[message.session_id] = rag_service.chat_history[message.session_id][-10:]
+        if len(rag["chat_history"][message.session_id]) > 10:
+            rag["chat_history"][message.session_id] = rag["chat_history"][message.session_id][-10:]
 
         return ChatResponse(
             response=result,
@@ -44,8 +45,14 @@ async def chat(message: ChatMessage):
         )
 
 @router.post("/reset")
-async def reset_session(session_id: str = "default"):
+async def reset_session(session_id: str = "default", tenant_id: str = Header(alias="X-Tenant-ID")):
     """Reset chat history for a session."""
-    if session_id in rag_service.chat_history:
-        rag_service.chat_history[session_id] = []
-    return {"message": f"Session {session_id} reset successfully"}
+    try:
+        rag = rag_service.get_tenant_rag(tenant_id)
+        if session_id in rag["chat_history"]:
+            rag["chat_history"][session_id] = []
+        return {"message": f"Session {session_id} reset successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))

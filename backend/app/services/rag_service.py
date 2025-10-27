@@ -6,12 +6,10 @@ from langchain_chroma import Chroma
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from ..config import settings
+from ..config import tenants, TenantConfig
 
-# Global variables for RAG components
-vectorstore = None
-conversation_chain = None
-chat_history = {}
+# Global variables for RAG components per tenant
+tenant_rag = {}  # tenant_id -> {"vectorstore": ..., "conversation_chain": ..., "chat_history": {}}
 
 # Custom prompt template
 CUSTOM_PROMPT = """You are a helpful AI assistant for JD AI Marketing Solutions, a company that helps small businesses implement AI solutions. 
@@ -27,25 +25,23 @@ Question: {question}
 
 Helpful Answer:"""
 
-def initialize_rag_system():
-    """Initialize the RAG system with document loading and vector store creation."""
-    global vectorstore, conversation_chain
-
+def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig):
+    """Initialize the RAG system for a specific tenant."""
     try:
         # Check if OpenAI API key is set
-        if not settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY not found in environment variables")
+        if not tenant_config.openai_api_key:
+            raise ValueError(f"OPENAI_API_KEY not found for tenant {tenant_id}")
 
         # Load documents
-        print("Loading documents...")
+        print(f"Loading documents for tenant {tenant_id}...")
         loader = DirectoryLoader(
-            './documents',
+            tenant_config.document_path,
             glob="**/*.md",
             loader_cls=TextLoader,
             loader_kwargs={'encoding': 'utf-8'}
         )
         documents = loader.load()
-        print(f"Loaded {len(documents)} documents")
+        print(f"Loaded {len(documents)} documents for tenant {tenant_id}")
 
         # Split documents into chunks
         text_splitter = RecursiveCharacterTextSplitter(
@@ -54,42 +50,41 @@ def initialize_rag_system():
             length_function=len,
         )
         splits = text_splitter.split_documents(documents)
-        print(f"Created {len(splits)} document chunks")
+        print(f"Created {len(splits)} document chunks for tenant {tenant_id}")
 
         # Create embeddings and vector store
-        print("Creating embeddings and vector store...")
+        print(f"Creating embeddings and vector store for tenant {tenant_id}...")
         embeddings = OpenAIEmbeddings(
             model="text-embedding-ada-002",
-            openai_api_key=settings.openai_api_key
+            openai_api_key=tenant_config.openai_api_key
         )
 
         # Check if vector store already exists
-        chroma_db_path = "./chroma_db"
+        chroma_db_path = tenant_config.chroma_db_path
         if os.path.exists(chroma_db_path):
-            print("Loading existing vector store...")
+            print(f"Loading existing vector store for tenant {tenant_id}...")
             vectorstore = Chroma(
                 persist_directory=chroma_db_path,
                 embedding_function=embeddings
             )
-            print("Vector store", vectorstore)
         else:
-            print("Creating new vector store...")
+            print(f"Creating new vector store for tenant {tenant_id}...")
             vectorstore = Chroma.from_documents(
                 documents=splits,
-                embedding=embeddings,
+                embedding_function=embeddings,
                 persist_directory=chroma_db_path
             )
-        print("Vector store ready")
+        print(f"Vector store ready for tenant {tenant_id}")
 
         # Initialize LLM
         llm = ChatOpenAI(
             model_name="gpt-4o-mini",
             temperature=0.7,
-            openai_api_key=settings.openai_api_key
+            openai_api_key=tenant_config.openai_api_key
         )
 
         # Create custom prompt
-        qa_prompt = PromptTemplate.from_template(CUSTOM_PROMPT)
+        qa_prompt = PromptTemplate.from_template(tenant_config.prompt)
 
         # Create retrieval chain
         def format_docs(docs):
@@ -108,10 +103,25 @@ def initialize_rag_system():
             | StrOutputParser()
         )
 
-        print("RAG system initialized successfully")
-        print(f"vectorstore set: {vectorstore is not None}, conversation_chain set: {conversation_chain is not None}")
+        tenant_rag[tenant_id] = {
+            "vectorstore": vectorstore,
+            "conversation_chain": conversation_chain,
+            "chat_history": {}
+        }
+
+        print(f"RAG system initialized successfully for tenant {tenant_id}")
         return True
 
     except Exception as e:
-        print(f"Error initializing RAG system: {str(e)}")
+        print(f"Error initializing RAG system for tenant {tenant_id}: {str(e)}")
         return False
+
+def get_tenant_rag(tenant_id: str):
+    """Get or initialize RAG for a tenant."""
+    if tenant_id not in tenant_rag:
+        if tenant_id not in tenants:
+            raise ValueError(f"Tenant {tenant_id} not configured")
+        success = initialize_rag_system_for_tenant(tenant_id, tenants[tenant_id])
+        if not success:
+            raise RuntimeError(f"Failed to initialize RAG for tenant {tenant_id}")
+    return tenant_rag[tenant_id]

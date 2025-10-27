@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from ..services import rag_service
+from ..config import tenants
 
 router = APIRouter()
 
@@ -17,5 +17,5 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "rag_initialized": rag_service.vectorstore is not None and rag_service.conversation_chain is not None
+        "tenants_loaded": len(tenants) > 0
     }
