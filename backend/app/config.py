@@ -6,13 +6,16 @@ from pydantic import BaseModel
 class TenantConfig(BaseModel):
     openai_api_key: str
     document_path: str
-    chroma_db_path: str
     prompt: str
+    pinecone_namespace: str
 
 class Settings(BaseSettings):
     openai_api_key: str
     frontend_origins: str = "*"
     tenants_file: str = "tenants.json"
+    pinecone_api_key: str
+    pinecone_environment: str
+    pinecone_index_name: str
 
     class Config:
         env_file = ".env"

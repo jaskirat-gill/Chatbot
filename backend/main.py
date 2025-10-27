@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 from app.config import settings
 from app.routes.health import router as health_router
 from app.routes.chat import router as chat_router
-from app.routes.admin import router as admin_router
 
 # Load environment variables
 load_dotenv()
@@ -38,7 +37,6 @@ app.add_middleware(
 # Include routers with API versioning
 app.include_router(health_router, prefix="/v1", tags=["health"])
 app.include_router(chat_router, prefix="/v1/api", tags=["chat"])
-app.include_router(admin_router, prefix="/v1/admin", tags=["admin"])
 
 if __name__ == "__main__":
     import uvicorn

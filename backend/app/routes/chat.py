@@ -23,7 +23,7 @@ async def chat(message: ChatMessage, tenant_id: str = Header(alias="X-Tenant-ID"
             rag["chat_history"][message.session_id] = []
 
         # Query the conversation chain
-        result = rag["conversation_chain"].invoke(message.message)
+        result = rag["conversation_chain"].invoke({"question": message.message})
 
         # Update chat history
         rag["chat_history"][message.session_id].append((message.message, result))

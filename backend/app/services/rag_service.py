@@ -1,29 +1,21 @@
 import os
+from pinecone import Pinecone
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from ..config import tenants, TenantConfig
+from langchain_core.documents import Document
+from ..config import tenants, TenantConfig, settings
+
+# Initialize Pinecone client
+pc = Pinecone(api_key=settings.pinecone_api_key)
+index = pc.Index(settings.pinecone_index_name)
 
 # Global variables for RAG components per tenant
-tenant_rag = {}  # tenant_id -> {"vectorstore": ..., "conversation_chain": ..., "chat_history": {}}
-
-# Custom prompt template
-CUSTOM_PROMPT = """You are a helpful AI assistant for JD AI Marketing Solutions, a company that helps small businesses implement AI solutions. 
-
-Use the following pieces of context to answer the question at the end. If you don't know the answer or the information is not in the context, politely say that you don't have that specific information and offer to help with something else related to JD AI Marketing Solutions.
-
-Be friendly, professional, and concise. When discussing our services, be enthusiastic but not pushy. Always prioritize providing value to the user.
-
-Context:
-{context}
-
-Question: {question}
-
-Helpful Answer:"""
+tenant_rag = {}  # tenant_id -> {"conversation_chain": ..., "chat_history": {}}
 
 def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig):
     """Initialize the RAG system for a specific tenant."""
@@ -52,28 +44,30 @@ def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig
         splits = text_splitter.split_documents(documents)
         print(f"Created {len(splits)} document chunks for tenant {tenant_id}")
 
-        # Create embeddings and vector store
-        print(f"Creating embeddings and vector store for tenant {tenant_id}...")
-        embeddings = OpenAIEmbeddings(
-            model="text-embedding-ada-002",
-            openai_api_key=tenant_config.openai_api_key
+        # Create embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/multilingual-e5-large",
+            model_kwargs={'device': 'cpu'}
         )
 
-        # Check if vector store already exists
-        chroma_db_path = tenant_config.chroma_db_path
-        if os.path.exists(chroma_db_path):
-            print(f"Loading existing vector store for tenant {tenant_id}...")
-            vectorstore = Chroma(
-                persist_directory=chroma_db_path,
-                embedding_function=embeddings
-            )
+        # Check if data exists in the namespace
+        namespace = tenant_config.pinecone_namespace
+        stats = index.describe_index_stats()
+        vector_count = stats['namespaces'].get(namespace, {}).get('vector_count', 0)
+        if vector_count == 0:
+            print(f"No data found for tenant {tenant_id}, upserting documents...")
+            # Embed documents
+            texts = [doc.page_content for doc in splits]
+            vectors = embeddings.embed_documents(texts)
+            # Prepare vectors for upsert
+            pinecone_vectors = [
+                (f"{tenant_id}_{i}", vector, {"text": text}) for i, (vector, text) in enumerate(zip(vectors, texts))
+            ]
+            index.upsert(vectors=pinecone_vectors, namespace=namespace)
+            print(f"Upserted {len(pinecone_vectors)} vectors for tenant {tenant_id}")
         else:
-            print(f"Creating new vector store for tenant {tenant_id}...")
-            vectorstore = Chroma.from_documents(
-                documents=splits,
-                embedding_function=embeddings,
-                persist_directory=chroma_db_path
-            )
+            print(f"Data already exists for tenant {tenant_id} ({vector_count} vectors), skipping upsert")
+
         print(f"Vector store ready for tenant {tenant_id}")
 
         # Initialize LLM
@@ -86,25 +80,28 @@ def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig
         # Create custom prompt
         qa_prompt = PromptTemplate.from_template(tenant_config.prompt)
 
+        # Create retrieval function
+        def retrieve_docs(query: str, k: int = 6):
+            query_vector = embeddings.embed_query(query)
+            results = index.query(vector=query_vector, top_k=k, namespace=namespace, include_metadata=True)
+            docs = []
+            for match in results['matches']:
+                text = match['metadata']['text']
+                docs.append(Document(page_content=text))
+            return docs
+
         # Create retrieval chain
         def format_docs(docs):
             return "\n\n".join(doc.page_content for doc in docs)
 
-        # Configure retriever with better search parameters
-        retriever = vectorstore.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 6}  # Retrieve top 6 most relevant chunks
-        )
-
         conversation_chain = (
-            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            {"context": lambda x: format_docs(retrieve_docs(x["question"])), "question": RunnablePassthrough()}
             | qa_prompt
             | llm
             | StrOutputParser()
         )
 
         tenant_rag[tenant_id] = {
-            "vectorstore": vectorstore,
             "conversation_chain": conversation_chain,
             "chat_history": {}
         }
