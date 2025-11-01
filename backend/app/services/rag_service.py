@@ -2,8 +2,7 @@ import os
 from pinecone import Pinecone
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -44,10 +43,10 @@ def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig
         splits = text_splitter.split_documents(documents)
         print(f"Created {len(splits)} document chunks for tenant {tenant_id}")
 
-        # Create embeddings
-        embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-small-en-v1.5",
-            model_kwargs={'device': 'cpu'}
+        # Create embeddings using OpenAI (much lighter!)
+        embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            openai_api_key=tenant_config.openai_api_key
         )
 
         # Check if data exists in the namespace
@@ -95,10 +94,10 @@ def initialize_rag_system_for_tenant(tenant_id: str, tenant_config: TenantConfig
             return "\n\n".join(doc.page_content for doc in docs)
 
         conversation_chain = (
-            {"context": lambda x: format_docs(retrieve_docs(x["question"])), "question": RunnablePassthrough()}
-            | qa_prompt
-            | llm
-            | StrOutputParser()
+                {"context": lambda x: format_docs(retrieve_docs(x["question"])), "question": RunnablePassthrough()}
+                | qa_prompt
+                | llm
+                | StrOutputParser()
         )
 
         tenant_rag[tenant_id] = {
