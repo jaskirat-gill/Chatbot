@@ -136,10 +136,10 @@ async def local_mic_stream(websocket: WebSocket, call_sid: str):
                 await voice_service.handle_stream_start(call_sid, f"local-{call_sid}", message)
 
             elif event_type == "media":
-                # Audio data from local microphone
+                # Audio data from local microphone (already PCM format)
                 payload = message.get("payload")
                 if payload:
-                    await voice_service.handle_media(call_sid, payload)
+                    await voice_service.handle_media(call_sid, payload, is_mulaw=False)
 
             elif event_type == "stop":
                 logger.info(f"Local mic stream stopped for call {call_sid}")

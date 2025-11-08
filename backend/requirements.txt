@@ -27,3 +27,7 @@ httpx==0.28.1
 # Audio testing (for test_local_mic.py)
 sounddevice
 numpy
+
+# Speech-to-Text
+deepgram-sdk==3.*
+

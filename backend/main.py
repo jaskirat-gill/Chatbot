@@ -21,6 +21,11 @@ logging.basicConfig(
 # Set specific loggers to INFO level
 logging.getLogger("app.services.voice_service").setLevel(logging.INFO)
 logging.getLogger("app.routes.voice").setLevel(logging.INFO)
+logging.getLogger("app.services.stt_service").setLevel(logging.INFO)
+
+# Suppress Deepgram SDK internal errors (task cancellation during cleanup is normal)
+logging.getLogger("deepgram").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
