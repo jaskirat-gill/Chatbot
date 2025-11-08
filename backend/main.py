@@ -2,12 +2,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+import logging
 from app.config import settings
 from app.routes.health import router as health_router
 from app.routes.chat import router as chat_router
+from app.routes.voice import router as voice_router
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Set specific loggers to INFO level
+logging.getLogger("app.services.voice_service").setLevel(logging.INFO)
+logging.getLogger("app.routes.voice").setLevel(logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,6 +49,7 @@ app.add_middleware(
 
 # Include routers with API versioning
 app.include_router(health_router, prefix="/v1", tags=["health"])
+app.include_router(voice_router, prefix="/v1/api", tags=["voice"])
 app.include_router(chat_router, prefix="/v1/api", tags=["chat"])
 
 if __name__ == "__main__":
