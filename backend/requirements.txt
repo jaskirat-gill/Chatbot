@@ -12,7 +12,7 @@ pydantic-settings==2.11.0
 # OpenAI (for embeddings and chat)
 openai==2.6.0
 
-# LangChain (minimal set - only what you need)
+# LangChain
 langchain-core==1.0.0
 langchain-openai==1.0.0
 langchain-community==0.4
@@ -23,3 +23,7 @@ pinecone==7.3.0
 
 # Utilities
 httpx==0.28.1
+
+# Audio testing (for test_local_mic.py)
+sounddevice
+numpy
