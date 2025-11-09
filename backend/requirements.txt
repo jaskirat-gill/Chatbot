@@ -29,5 +29,5 @@ sounddevice
 numpy
 
 # Speech-to-Text
-deepgram-sdk==3.*
+deepgram-sdk>=5.0.0
 

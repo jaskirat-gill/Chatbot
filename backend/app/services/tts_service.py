@@ -7,7 +7,7 @@ import io
 logger = logging.getLogger(__name__)
 
 try:
-    from deepgram import DeepgramClient, SpeakOptions
+    from deepgram import DeepgramClient
     DEEPGRAM_AVAILABLE = True
 except ImportError:
     DEEPGRAM_AVAILABLE = False
@@ -40,7 +40,7 @@ class TTSService:
             return
 
         try:
-            self.client = DeepgramClient(api_key)
+            self.client = DeepgramClient(api_key=api_key)
             self.enabled = True
             logger.info("Deepgram TTS service initialized successfully")
         except Exception as e:
@@ -73,30 +73,30 @@ class TTSService:
             return None
 
         try:
-            # Configure TTS options
-            options = SpeakOptions(
+            # Generate speech using the speak v1 API
+            response = self.client.speak.v1.audio.generate(
+                text=text,
                 model=model,
                 encoding=encoding,
                 sample_rate=sample_rate,
                 container=container
             )
 
-            # Generate speech using the speak REST API
-            response = self.client.speak.rest.v("1").stream_memory(
-                {"text": text},
-                options
-            )
-
-            # Get audio data from response
+            # In v5, response has a stream attribute (BytesIO)
             if hasattr(response, 'stream'):
                 audio_data = response.stream.getvalue()
-            elif hasattr(response, 'content'):
-                audio_data = response.content
-            else:
+                return audio_data if audio_data else None
+
+            # Fallback: if response is iterable, collect chunks
+            try:
+                audio_data = b''
+                for chunk in response:
+                    audio_data += chunk
+                return audio_data if audio_data else None
+            except TypeError:
                 logger.error(f"[TTS] Unknown response format: {type(response)}")
                 return None
 
-            return audio_data
 
         except Exception as e:
             logger.error(f"[TTS] Error synthesizing speech: {e}", exc_info=True)
