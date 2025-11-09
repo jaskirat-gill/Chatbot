@@ -125,6 +125,11 @@ class VoiceService:
             if not success:
                 logger.error(f"Failed to start STT for {call_sid}")
 
+        # Send initial greeting message
+        greeting = "Hi! Thanks for calling Fusion Fireworks. I'm Sofia. How can I help you?"
+        logger.info(f"[GREETING] Sending initial message")
+        await self._send_audio_response(call_sid, greeting)
+
     async def handle_media(self, call_sid: str, payload: str, is_mulaw: bool = True):
         """
         Handle incoming audio data.
