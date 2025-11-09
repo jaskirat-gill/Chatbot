@@ -73,8 +73,6 @@ class TTSService:
             return None
 
         try:
-            logger.info(f"[TTS] Synthesizing: '{text[:50]}...' (model={model}, encoding={encoding})")
-
             # Configure TTS options
             options = SpeakOptions(
                 model=model,
@@ -90,7 +88,6 @@ class TTSService:
             )
 
             # Get audio data from response
-            # The response has a 'stream' attribute that is a BytesIO object
             if hasattr(response, 'stream'):
                 audio_data = response.stream.getvalue()
             elif hasattr(response, 'content'):
@@ -99,7 +96,6 @@ class TTSService:
                 logger.error(f"[TTS] Unknown response format: {type(response)}")
                 return None
 
-            logger.info(f"[TTS] Generated {len(audio_data)} bytes of audio")
             return audio_data
 
         except Exception as e:
@@ -191,7 +187,6 @@ class TTSService:
         samples_per_chunk = (sample_rate * chunk_size_ms) // 1000
         chunk_size_bytes = samples_per_chunk * bytes_per_sample
 
-        logger.info(f"[TTS] Streaming {len(audio_data)} bytes in chunks of {chunk_size_bytes} bytes")
 
         # Split into chunks
         for i in range(0, len(audio_data), chunk_size_bytes):

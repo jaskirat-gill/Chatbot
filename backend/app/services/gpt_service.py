@@ -119,7 +119,6 @@ Brief, friendly, helpful. No rambling. Answer what they ask, capture info if int
             # Add current user input
             messages.append({"role": "user", "content": user_input})
 
-            logger.debug(f"[GPT] Sending request with {len(messages)} messages")
 
             if stream:
                 return await self._stream_response(messages, model, max_completion_tokens)
@@ -138,7 +137,6 @@ Brief, friendly, helpful. No rambling. Answer what they ask, capture info if int
     ) -> str:
         """Stream response from GPT and return complete text."""
         response_text = ""
-        chunk_count = 0
 
         stream = self.client.chat.completions.create(
             model=model,
@@ -148,20 +146,11 @@ Brief, friendly, helpful. No rambling. Answer what they ask, capture info if int
         )
 
         async for chunk in await stream:
-            chunk_count += 1
-            logger.debug(f"[GPT] Received chunk {chunk_count}: {chunk}")
-
             if chunk.choices and len(chunk.choices) > 0:
                 delta = chunk.choices[0].delta
                 if delta and hasattr(delta, 'content') and delta.content:
-                    content = delta.content
-                    response_text += content
-                    # Log streaming chunks at debug level
-                    logger.debug(f"[GPT STREAM] {content}")
-            else:
-                logger.debug(f"[GPT] Chunk {chunk_count} has no choices")
+                    response_text += delta.content
 
-        logger.info(f"[GPT] Stream complete: {chunk_count} chunks, {len(response_text)} characters")
         return response_text
 
     async def _get_response(

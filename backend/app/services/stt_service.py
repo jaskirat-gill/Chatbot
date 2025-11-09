@@ -92,7 +92,7 @@ class STTService:
             # Set up event handlers BEFORE starting connection
             async def on_open(self_event=None, open_result=None, **kwargs):
                 """Handle connection open"""
-                logger.info(f"[STT] ✓ Deepgram connection OPENED for {call_sid}")
+                logger.debug(f"[STT] Connection opened for {call_sid}")
 
             async def on_message(self_event=None, result=None, **kwargs):
                 """Handle transcription results from Nova 3"""
@@ -123,11 +123,11 @@ class STTService:
 
             async def on_error(self_event=None, error=None, **kwargs):
                 """Handle errors"""
-                logger.error(f"[STT] ❌ Deepgram error for {call_sid}: {error}")
+                logger.error(f"[STT] Error for {call_sid}: {error}")
 
             async def on_close(self_event=None, close_result=None, **kwargs):
                 """Handle connection close"""
-                logger.info(f"[STT] Connection closed for {call_sid}")
+                logger.debug(f"[STT] Connection closed for {call_sid}")
 
             async def on_unhandled(self_event=None, unhandled=None, **kwargs):
                 """Handle unhandled messages"""
@@ -165,11 +165,11 @@ class STTService:
                 "connection": dg_connection,
                 "started": True
             }
-            logger.info(f"[STT] ✓ Deepgram transcription started for {call_sid} (model=nova-3, sample_rate={sample_rate}Hz)")
+            logger.info(f"[STT] Started for {call_sid} (nova-3, {sample_rate}Hz)")
             return True
 
         except Exception as e:
-            logger.error(f"[STT] ❌❌❌ Exception starting stream for {call_sid}: {e}", exc_info=True)
+            logger.error(f"[STT] ❌ Exception starting stream for {call_sid}: {e}", exc_info=True)
             return False
 
     async def send_audio(self, call_sid: str, pcm_audio_data: bytes) -> bool:
@@ -194,14 +194,6 @@ class STTService:
             conn_info = self.active_connections[call_sid]
             connection = conn_info["connection"]
 
-            # Track send count
-            if "send_count" not in conn_info:
-                conn_info["send_count"] = 0
-            conn_info["send_count"] += 1
-
-            # Only log the first audio chunk to confirm it's working
-            if conn_info["send_count"] == 1:
-                logger.info(f"[STT] Started sending audio to Deepgram for {call_sid}")
 
             # Send audio data
             await connection.send(pcm_audio_data)
@@ -228,7 +220,7 @@ class STTService:
             connection = conn_info["connection"]
             await connection.finish()
             del self.active_connections[call_sid]
-            logger.info(f"Stopped Deepgram stream for {call_sid}")
+            logger.debug(f"[STT] Stopped stream for {call_sid}")
             return True
         except Exception as e:
             logger.error(f"Error stopping stream for {call_sid}: {e}")

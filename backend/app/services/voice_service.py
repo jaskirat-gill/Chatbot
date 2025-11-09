@@ -1,6 +1,7 @@
 import logging
 import base64
 import struct
+import time
 from typing import Dict, Optional
 from datetime import datetime
 from app.config import settings
@@ -90,30 +91,39 @@ class VoiceService:
             "bytes_received": 0,
             "start_message": start_message,
             "transcription_count": 0,
-            "source_format": "unknown",  # Will be determined from first audio chunk
-            "conversation_buffer": [],  # Buffer for building complete sentences
-            "gpt_response_count": 0,  # Track GPT responses
-            "conversation_history": [],  # Track conversation for context
-            "gpt_timer": None,  # Timer for delayed GPT processing
-            "websocket": websocket,  # WebSocket for sending audio back
-            "is_local": websocket and hasattr(websocket, '_is_local_test'),  # Flag for local testing
+            "source_format": "unknown",
+            "conversation_buffer": [],
+            "gpt_response_count": 0,
+            "conversation_history": [],
+            "gpt_timer": None,
+            "websocket": websocket,
+            "is_local": websocket and hasattr(websocket, '_is_local_test'),
+            # Latency tracking
+            "latency_metrics": {
+                "last_audio_timestamp": None,
+                "last_transcript_timestamp": None,
+                "transcript_start": None,
+                "gpt_start": None,
+                "gpt_end": None,
+                "tts_start": None,
+                "tts_end": None,
+            },
+            "processing_lock": False,  # Prevent duplicate processing
+            "last_processed_text": None,  # Track last processed utterance
+            "duplicate_prevention_count": 0,  # Count prevented duplicates
         }
         self.stats["total_calls"] += 1
-
-        # Log stream parameters at debug level
-        stream_params = start_message.get("start", {})
-        logger.debug(f"Stream parameters: {stream_params}")
 
         # Start Deepgram streaming session if enabled
         if self.stt_service.is_enabled():
             success = await self.stt_service.start_stream(
                 call_sid=call_sid,
                 transcript_callback=self._handle_transcript,
-                sample_rate=8000,  # Twilio and our local mic both use 8kHz
+                sample_rate=8000,
                 channels=1
             )
             if not success:
-                logger.warning(f"[VOICE] Failed to start Deepgram streaming for call {call_sid}")
+                logger.error(f"Failed to start STT for {call_sid}")
 
     async def handle_media(self, call_sid: str, payload: str, is_mulaw: bool = True):
         """
@@ -131,16 +141,16 @@ class VoiceService:
         try:
             # Decode the base64 audio payload
             audio_data = base64.b64decode(payload)
+
+            # Track timestamp for latency measurement
+            self.active_calls[call_sid]["latency_metrics"]["last_audio_timestamp"] = time.time()
+
             # Update statistics
             self.active_calls[call_sid]["audio_chunks"] += 1
             self.active_calls[call_sid]["bytes_received"] += len(audio_data)
             self.stats["total_audio_chunks"] += 1
             self.stats["total_bytes_received"] += len(audio_data)
-            # Log every 100 chunks at debug level
-            if self.active_calls[call_sid]["audio_chunks"] % 100 == 0:
-                chunks = self.active_calls[call_sid]["audio_chunks"]
-                bytes_received = self.active_calls[call_sid]["bytes_received"]
-                logger.debug(f"Call {call_sid}: Received {chunks} chunks, {bytes_received} bytes total")
+
             # Process the audio data with format information
             await self._process_audio(call_sid, audio_data, is_mulaw=is_mulaw)
         except Exception as e:
@@ -159,22 +169,13 @@ class VoiceService:
         try:
             # Convert to PCM if needed
             if is_mulaw:
-                # Twilio sends μ-law - convert to 16-bit PCM
                 pcm_audio = ulaw_decode(audio_data)
-
-                # Calculate RMS for voice activity detection (optional logging)
-                rms = calculate_rms(pcm_audio)
-                if rms > 500 and self.active_calls[call_sid]["audio_chunks"] % 50 == 0:
-                    logger.debug(f"Call {call_sid}: Voice activity detected - RMS: {rms:.0f}")
             else:
-                # Local mic already sends PCM
                 pcm_audio = audio_data
 
             # Stream PCM audio directly to Deepgram
             if self.stt_service.is_enabled():
-                sent = await self.stt_service.send_audio(call_sid, pcm_audio)
-                if not sent and self.active_calls[call_sid]["audio_chunks"] == 1:
-                    logger.error(f"[VOICE] Failed to send first audio chunk to Deepgram for {call_sid}")
+                await self.stt_service.send_audio(call_sid, pcm_audio)
 
         except Exception as e:
             logger.error(f"Error processing audio for call {call_sid}: {e}", exc_info=True)
@@ -184,12 +185,12 @@ class VoiceService:
         if call_sid in self.active_calls:
             call_info = self.active_calls[call_sid]
             duration = (datetime.now() - call_info["start_time"]).total_seconds()
-            logger.info(f"Stream stopped - CallSid: {call_sid}")
-            logger.info(f"  Duration: {duration:.2f}s")
-            logger.info(f"  Total chunks: {call_info['audio_chunks']}")
-            logger.info(f"  Total bytes: {call_info['bytes_received']}")
-            logger.info(f"  Transcriptions: {call_info['transcription_count']}")
-            logger.info(f"  GPT Responses: {call_info['gpt_response_count']}")
+
+            logger.info(f"Stream stopped - {call_sid}")
+            logger.info(f"  Duration: {duration:.2f}s | Chunks: {call_info['audio_chunks']} | "
+                       f"Transcripts: {call_info['transcription_count']} | "
+                       f"GPT Responses: {call_info['gpt_response_count']} | "
+                       f"Duplicates Prevented: {call_info['duplicate_prevention_count']}")
 
             # Stop Deepgram stream
             if self.stt_service.is_enabled():
@@ -198,11 +199,11 @@ class VoiceService:
     async def cleanup_call(self, call_sid: str):
         """Clean up resources for a call."""
         if call_sid in self.active_calls:
-            logger.info(f"Cleaning up call: {call_sid}")
             # Ensure Deepgram stream is stopped
             if self.stt_service.is_enabled():
                 await self.stt_service.stop_stream(call_sid)
             del self.active_calls[call_sid]
+            logger.debug(f"Cleaned up call: {call_sid}")
 
     async def _handle_transcript(self, transcript: str, metadata: dict):
         """
@@ -218,65 +219,92 @@ class VoiceService:
         is_final = metadata.get("is_final", False)
         speech_final = metadata.get("speech_final", False)
 
-        # Update transcription count
-        if call_sid in self.active_calls:
-            self.active_calls[call_sid]["transcription_count"] += 1
+        if call_sid not in self.active_calls:
+            return
 
-        # Log the transcript
-        logger.info(f"[TRANSCRIPT] CallSid: {call_sid}, Text: '{transcript}', Final: {is_final}, SpeechFinal: {speech_final}, Confidence: {confidence:.2f}")
+        # Track latency
+        transcript_time = time.time()
+        call_info = self.active_calls[call_sid]
+        metrics = call_info["latency_metrics"]
+
+        if metrics["last_audio_timestamp"]:
+            audio_to_transcript = (transcript_time - metrics["last_audio_timestamp"]) * 1000
+            logger.debug(f"[LATENCY] Audio->Transcript: {audio_to_transcript:.0f}ms")
+
+        metrics["last_transcript_timestamp"] = transcript_time
+        if not metrics["transcript_start"]:
+            metrics["transcript_start"] = transcript_time
+
+        # Update transcription count
+        call_info["transcription_count"] += 1
+
+        # Log transcript with key metadata
+        logger.info(f"[STT] '{transcript}' (final={is_final}, speech_final={speech_final}, conf={confidence:.2f})")
 
         # Process complete utterances - send to GPT when speech is final OR after collecting final transcripts
-        if is_final and transcript.strip() and call_sid in self.active_calls:
+        if is_final and transcript.strip():
             # Add to conversation buffer
-            self.active_calls[call_sid]["conversation_buffer"].append(transcript.strip())
-            logger.debug(f"[TRANSCRIPT] Added to buffer. Buffer size: {len(self.active_calls[call_sid]['conversation_buffer'])}")
+            call_info["conversation_buffer"].append(transcript.strip())
 
             # If speech is marked as final, process immediately
             if speech_final:
-                logger.info(f"[TRANSCRIPT] Speech final detected - processing immediately")
                 # Cancel any pending timer
-                if "gpt_timer" in self.active_calls[call_sid] and self.active_calls[call_sid]["gpt_timer"]:
-                    self.active_calls[call_sid]["gpt_timer"].cancel()
-                    logger.debug(f"[TRANSCRIPT] Cancelled pending timer")
-                
+                if call_info["gpt_timer"]:
+                    call_info["gpt_timer"].cancel()
+
                 # Build the complete user input
-                user_input = " ".join(self.active_calls[call_sid]["conversation_buffer"])
+                user_input = " ".join(call_info["conversation_buffer"])
+
+                # Check for duplicate processing
+                if call_info["processing_lock"]:
+                    call_info["duplicate_prevention_count"] += 1
+                    logger.warning(f"[DUPLICATE] Already processing, skipped duplicate #{call_info['duplicate_prevention_count']}")
+                    return
+
+                if call_info["last_processed_text"] == user_input:
+                    call_info["duplicate_prevention_count"] += 1
+                    logger.warning(f"[DUPLICATE] Same text already processed, skipped duplicate #{call_info['duplicate_prevention_count']}")
+                    return
 
                 # Send to GPT and get response
                 await self._process_with_gpt(call_sid, user_input)
 
                 # Clear buffer after processing
-                self.active_calls[call_sid]["conversation_buffer"].clear()
+                call_info["conversation_buffer"].clear()
             else:
                 # Schedule a delayed processing if more transcripts don't arrive
-                logger.debug(f"[TRANSCRIPT] No speech_final - scheduling delayed processing")
-                
                 # Cancel any existing timer
-                if "gpt_timer" in self.active_calls[call_sid] and self.active_calls[call_sid]["gpt_timer"]:
-                    self.active_calls[call_sid]["gpt_timer"].cancel()
-                    logger.debug(f"[TRANSCRIPT] Cancelled existing timer")
+                if call_info["gpt_timer"]:
+                    call_info["gpt_timer"].cancel()
 
                 # Create new timer to process after 1.5 seconds of no new transcripts
                 import asyncio
                 async def delayed_process():
                     try:
-                        logger.debug(f"[TRANSCRIPT] Timer started - waiting 1.5s...")
                         await asyncio.sleep(1.5)
-                        logger.debug(f"[TRANSCRIPT] Timer expired - checking buffer")
-                        if call_sid in self.active_calls and self.active_calls[call_sid]["conversation_buffer"]:
-                            user_input = " ".join(self.active_calls[call_sid]["conversation_buffer"])
-                            logger.info(f"[TRANSCRIPT] Timer triggered GPT processing for: '{user_input}'")
-                            await self._process_with_gpt(call_sid, user_input)
-                            self.active_calls[call_sid]["conversation_buffer"].clear()
-                        else:
-                            logger.debug(f"[TRANSCRIPT] Timer expired but buffer is empty")
-                    except asyncio.CancelledError:
-                        logger.debug(f"[TRANSCRIPT] Timer cancelled")
-                    except Exception as e:
-                        logger.error(f"[TRANSCRIPT] Error in delayed processing: {e}", exc_info=True)
+                        if call_sid in self.active_calls and call_info["conversation_buffer"]:
+                            user_input = " ".join(call_info["conversation_buffer"])
 
-                self.active_calls[call_sid]["gpt_timer"] = asyncio.create_task(delayed_process())
-                logger.debug(f"[TRANSCRIPT] New timer created")
+                            # Check for duplicate before processing
+                            if call_info["processing_lock"]:
+                                call_info["duplicate_prevention_count"] += 1
+                                logger.warning(f"[DUPLICATE] Timer: already processing, skipped")
+                                return
+
+                            if call_info["last_processed_text"] == user_input:
+                                call_info["duplicate_prevention_count"] += 1
+                                logger.warning(f"[DUPLICATE] Timer: same text, skipped")
+                                return
+
+                            logger.debug(f"[TIMER] Triggered GPT processing")
+                            await self._process_with_gpt(call_sid, user_input)
+                            call_info["conversation_buffer"].clear()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error in delayed processing: {e}", exc_info=True)
+
+                call_info["gpt_timer"] = asyncio.create_task(delayed_process())
 
     async def _process_with_gpt(self, call_sid: str, user_input: str):
         """
@@ -287,52 +315,68 @@ class VoiceService:
             user_input: The user's complete utterance to send to GPT
         """
         if not self.gpt_service.is_enabled():
-            logger.warning(f"[GPT] GPT service not available for call {call_sid}")
+            logger.warning(f"GPT service not available for {call_sid}")
             return
 
+        if call_sid not in self.active_calls:
+            return
+
+        call_info = self.active_calls[call_sid]
+        metrics = call_info["latency_metrics"]
+
         try:
-            logger.info(f"[GPT] Sending to GPT - CallSid: {call_sid}, Input: '{user_input}'")
+            # Set processing lock
+            call_info["processing_lock"] = True
+            call_info["last_processed_text"] = user_input
+
+            # Track GPT start
+            gpt_start = time.time()
+            metrics["gpt_start"] = gpt_start
+
+            # Log latency from transcript to GPT
+            if metrics["transcript_start"]:
+                transcript_to_gpt = (gpt_start - metrics["transcript_start"]) * 1000
+                logger.info(f"[LATENCY] Transcript->GPT: {transcript_to_gpt:.0f}ms")
+
+            logger.info(f"[GPT] Input: '{user_input}'")
 
             # Get conversation history for this call
-            conversation_history = []
-            if call_sid in self.active_calls:
-                conversation_history = self.active_calls[call_sid]["conversation_history"]
+            conversation_history = call_info["conversation_history"]
 
             # Get response from GPT service
             response_text = await self.gpt_service.get_response(
                 user_input=user_input,
                 conversation_history=conversation_history,
-                model="gpt-5-nano",
-                max_completion_tokens=1500,
+                model="gpt-4o-mini",
+                max_completion_tokens=150,
                 stream=True
             )
 
+            # Track GPT end
+            gpt_end = time.time()
+            metrics["gpt_end"] = gpt_end
+            gpt_duration = (gpt_end - gpt_start) * 1000
+            logger.info(f"[LATENCY] GPT duration: {gpt_duration:.0f}ms")
+
             # Update response count and conversation history
-            if call_sid in self.active_calls:
-                self.active_calls[call_sid]["gpt_response_count"] += 1
+            call_info["gpt_response_count"] += 1
+            call_info["conversation_history"].append({"role": "user", "content": user_input})
+            call_info["conversation_history"].append({"role": "assistant", "content": response_text})
 
-                # Add to conversation history
-                self.active_calls[call_sid]["conversation_history"].append(
-                    {"role": "user", "content": user_input}
-                )
-                self.active_calls[call_sid]["conversation_history"].append(
-                    {"role": "assistant", "content": response_text}
-                )
+            # Keep only last 10 messages (5 exchanges) to manage context window
+            if len(call_info["conversation_history"]) > 10:
+                call_info["conversation_history"] = call_info["conversation_history"][-10:]
 
-                # Keep only last 10 messages (5 exchanges) to manage context window
-                if len(self.active_calls[call_sid]["conversation_history"]) > 10:
-                    self.active_calls[call_sid]["conversation_history"] = \
-                        self.active_calls[call_sid]["conversation_history"][-10:]
-
-            # Log the complete GPT response
-            logger.info(f"[GPT RESPONSE] CallSid: {call_sid}, Response: '{response_text}'")
-            logger.info(f"[GPT RESPONSE] Length: {len(response_text)} characters")
+            logger.info(f"[GPT] Response: '{response_text}'")
 
             # Convert response to speech and send back
             await self._send_audio_response(call_sid, response_text)
 
         except Exception as e:
-            logger.error(f"[GPT] Error processing with GPT for call {call_sid}: {e}", exc_info=True)
+            logger.error(f"Error processing with GPT for {call_sid}: {e}", exc_info=True)
+        finally:
+            # Release processing lock
+            call_info["processing_lock"] = False
 
     async def _send_audio_response(self, call_sid: str, text: str):
         """
@@ -343,36 +387,54 @@ class VoiceService:
             text: Text to convert to speech
         """
         if not self.tts_service.is_enabled():
-            logger.warning(f"[TTS] TTS service not available for call {call_sid}")
+            logger.warning(f"TTS service not available for {call_sid}")
             return
 
         if call_sid not in self.active_calls:
-            logger.warning(f"[TTS] Call {call_sid} not found in active calls")
             return
 
+        call_info = self.active_calls[call_sid]
+        metrics = call_info["latency_metrics"]
+
         try:
-            call_info = self.active_calls[call_sid]
             websocket = call_info.get("websocket")
             is_local = call_info.get("is_local", False)
 
             if not websocket:
-                logger.warning(f"[TTS] No websocket available for call {call_sid}")
+                logger.warning(f"No websocket available for {call_sid}")
                 return
 
-            logger.info(f"[TTS] Generating audio for: '{text[:50]}...' (local={is_local})")
+            # Track TTS start
+            tts_start = time.time()
+            metrics["tts_start"] = tts_start
+
+            # Log latency from GPT to TTS
+            if metrics["gpt_end"]:
+                gpt_to_tts = (tts_start - metrics["gpt_end"]) * 1000
+                logger.debug(f"[LATENCY] GPT->TTS: {gpt_to_tts:.0f}ms")
+
+            logger.info(f"[TTS] Generating audio ({len(text)} chars)")
 
             if is_local:
                 # For local testing, send PCM audio to be played through speakers
                 audio_data = await self.tts_service.synthesize_for_local(text)
                 if audio_data:
-                    # Send as a single message to local client for playback
                     await websocket.send_json({
                         "event": "audio_response",
                         "audio": base64.b64encode(audio_data).decode('utf-8'),
                         "encoding": "linear16",
                         "sample_rate": 16000
                     })
-                    logger.info(f"[TTS] Sent {len(audio_data)} bytes to local client")
+
+                    # Track TTS end and total latency
+                    tts_end = time.time()
+                    metrics["tts_end"] = tts_end
+                    tts_duration = (tts_end - tts_start) * 1000
+                    total_latency = (tts_end - metrics["transcript_start"]) * 1000 if metrics["transcript_start"] else 0
+
+                    logger.info(f"[LATENCY] TTS duration: {tts_duration:.0f}ms")
+                    logger.info(f"[LATENCY] ⏱️  TOTAL (Transcript->Audio): {total_latency:.0f}ms")
+                    logger.info(f"[TTS] Sent {len(audio_data)} bytes")
             else:
                 # For Twilio, stream mulaw audio chunks
                 chunk_count = 0
@@ -382,7 +444,6 @@ class VoiceService:
                     for_twilio=True
                 ):
                     chunk_count += 1
-                    # Send media message to Twilio
                     await websocket.send_json({
                         "event": "media",
                         "streamSid": call_info["stream_sid"],
@@ -391,13 +452,18 @@ class VoiceService:
                         }
                     })
 
-                    if chunk_count % 25 == 0:  # Log every 500ms
-                        logger.debug(f"[TTS] Sent {chunk_count} audio chunks to Twilio")
+                # Track TTS end and total latency
+                tts_end = time.time()
+                metrics["tts_end"] = tts_end
+                tts_duration = (tts_end - tts_start) * 1000
+                total_latency = (tts_end - metrics["transcript_start"]) * 1000 if metrics["transcript_start"] else 0
 
-                logger.info(f"[TTS] Sent {chunk_count} audio chunks to Twilio")
+                logger.info(f"[LATENCY] TTS duration: {tts_duration:.0f}ms")
+                logger.info(f"[LATENCY] ⏱️  TOTAL (Transcript->Audio): {total_latency:.0f}ms")
+                logger.info(f"[TTS] Sent {chunk_count} chunks")
 
         except Exception as e:
-            logger.error(f"[TTS] Error sending audio response for call {call_sid}: {e}", exc_info=True)
+            logger.error(f"Error sending audio response for {call_sid}: {e}", exc_info=True)
 
     def get_stats(self) -> dict:
         """Get statistics about the voice service."""

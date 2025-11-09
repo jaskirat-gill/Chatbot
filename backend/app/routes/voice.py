@@ -59,7 +59,7 @@ async def websocket_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     active_connections[call_sid] = websocket
 
-    logger.info(f"WebSocket connection established for call: {call_sid}")
+    logger.info(f"WebSocket connected: {call_sid}")
 
     message_count = 0
     media_count = 0
@@ -74,8 +74,6 @@ async def websocket_stream(websocket: WebSocket, call_sid: str):
             event_type = message.get("event")
 
             if event_type == "start":
-                logger.info(f"Stream started for call {call_sid}")
-                logger.debug(f"Stream start details: {message}")
                 stream_sid = message.get("streamSid")
                 await voice_service.handle_stream_start(call_sid, stream_sid, message, websocket=websocket)
 
@@ -85,29 +83,23 @@ async def websocket_stream(websocket: WebSocket, call_sid: str):
                 payload = message.get("media", {}).get("payload")
                 if payload:
                     await voice_service.handle_media(call_sid, payload)
-                else:
-                    logger.warning(f"Received media event with no payload for call {call_sid}")
-
-                # Log every 50 media messages at debug level to track activity
-                if media_count % 50 == 0:
-                    logger.debug(f"Call {call_sid}: Received {media_count} media messages, {message_count} total messages")
 
             elif event_type == "stop":
-                logger.info(f"Stream stopped for call {call_sid} - Total messages: {message_count}, Media: {media_count}")
+                logger.info(f"Stream stopped: {call_sid} (msgs={message_count}, media={media_count})")
                 await voice_service.handle_stream_stop(call_sid)
                 break
 
             elif event_type == "mark":
                 # Mark events are sent when custom marks are reached
-                logger.debug(f"Mark event received: {message}")
+                logger.debug(f"Mark event: {message}")
 
             else:
-                logger.warning(f"Unknown event type '{event_type}' for call {call_sid}: {message}")
+                logger.warning(f"Unknown event '{event_type}' for {call_sid}")
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for call: {call_sid}")
+        logger.info(f"WebSocket disconnected: {call_sid}")
     except Exception as e:
-        logger.error(f"Error in WebSocket connection for call {call_sid}: {e}")
+        logger.error(f"WebSocket error for {call_sid}: {e}")
     finally:
         if call_sid in active_connections:
             del active_connections[call_sid]
@@ -144,14 +136,14 @@ async def local_mic_stream(websocket: WebSocket, call_sid: str):
                     await voice_service.handle_media(call_sid, payload, is_mulaw=False)
 
             elif event_type == "stop":
-                logger.info(f"Local mic stream stopped for call {call_sid}")
+                logger.info(f"Local mic stopped: {call_sid}")
                 await voice_service.handle_stream_stop(call_sid)
                 break
 
     except WebSocketDisconnect:
-        logger.info(f"Local mic WebSocket disconnected for call: {call_sid}")
+        logger.info(f"Local mic disconnected: {call_sid}")
     except Exception as e:
-        logger.error(f"Error in local mic WebSocket for call {call_sid}: {e}")
+        logger.error(f"Local mic error for {call_sid}: {e}")
     finally:
         await voice_service.cleanup_call(call_sid)
 
