@@ -10,6 +10,9 @@ class TenantConfig(BaseModel):
     pinecone_namespace: str
 
 class Settings(BaseSettings):
+    # Public domain for Twilio webhooks (e.g., "your-app.ondigitalocean.app")
+    base_url: str = ""
+
     openai_api_key: str
     frontend_origins: str = "*"
     tenants_file: str = "tenants.json"
@@ -17,11 +20,10 @@ class Settings(BaseSettings):
     pinecone_environment: str
     pinecone_index_name: str
 
-    # Optional fields that might be in your .env (to prevent errors)
-    base_url: str = ""
+    # Voice service API keys
+    deepgram_api_key: str = ""
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
-    deepgram_api_key: str = ""
 
     model_config = {
         "env_file": ".env",

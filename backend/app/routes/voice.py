@@ -5,6 +5,7 @@ import json
 import base64
 from typing import Dict, Set
 from app.services.voice_service import VoiceService
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +29,15 @@ async def handle_incoming_call(request: Request):
 
     logger.info(f"Incoming call - CallSid: {call_sid}, From: {from_number}, To: {to_number}")
 
-    # Get the base URL for the WebSocket connection
-    # In production, this should be your public domain
-    # For local testing with ngrok, you'll need to update this
-    host = request.headers.get("host", "localhost:8000")
-    protocol = "wss" if "https" in str(request.url) else "ws"
+    # Get the base URL - use settings.base_url or fallback to localhost
+    if settings.base_url:
+        host = settings.base_url
+        protocol = "wss"  # Production uses secure WebSocket
+    else:
+        # Fallback for local development
+        host = request.headers.get("host", "localhost:8000")
+        protocol = "ws"
+
     ws_url = f"{protocol}://{host}/v1/api/voice/stream/{call_sid}"
 
     # TwiML response to connect the call to our WebSocket
@@ -92,6 +97,10 @@ async def websocket_stream(websocket: WebSocket, call_sid: str):
             elif event_type == "mark":
                 # Mark events are sent when custom marks are reached
                 logger.debug(f"Mark event: {message}")
+
+            elif event_type == "connected":
+                # Twilio sends this at connection start
+                logger.debug(f"Twilio connected event for {call_sid}")
 
             else:
                 logger.warning(f"Unknown event '{event_type}' for {call_sid}")

@@ -210,9 +210,9 @@ class STTService:
             # Send raw audio bytes directly - SDK wraps internally
             await connection.send_media(pcm_audio_data)
 
-            # Log every 100 chunks
-            if conn_info["chunks_sent"] % 100 == 0:
-                logger.info(f"[STT] Sent {conn_info['chunks_sent']} audio chunks for {call_sid}")
+            # Log every 200 chunks
+            if conn_info["chunks_sent"] % 200 == 0:
+                logger.debug(f"[STT] Sent {conn_info['chunks_sent']} audio chunks for {call_sid}")
 
             return True
         except Exception as e:
