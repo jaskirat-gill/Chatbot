@@ -5,6 +5,7 @@ from typing import Dict, Optional
 from datetime import datetime
 from app.config import settings
 from app.services.stt_service import STTService
+from app.services.gpt_service import GPTService
 
 logger = logging.getLogger(__name__)
 # μ-law decoding table (since audioop was removed in Python 3.13)
@@ -64,6 +65,13 @@ class VoiceService:
         else:
             logger.warning("Voice service initialized without transcription (Deepgram not available)")
 
+        # Initialize GPT service for generating responses
+        self.gpt_service = GPTService()
+        if self.gpt_service.is_enabled():
+            logger.info("Voice service initialized with GPT streaming enabled")
+        else:
+            logger.warning("Voice service initialized without GPT (OpenAI not available)")
+
     async def handle_stream_start(self, call_sid: str, stream_sid: str, start_message: dict):
         """Handle the start of a media stream."""
         logger.info(f"Stream started - CallSid: {call_sid}, StreamSid: {stream_sid}")
@@ -75,6 +83,10 @@ class VoiceService:
             "start_message": start_message,
             "transcription_count": 0,
             "source_format": "unknown",  # Will be determined from first audio chunk
+            "conversation_buffer": [],  # Buffer for building complete sentences
+            "gpt_response_count": 0,  # Track GPT responses
+            "conversation_history": [],  # Track conversation for context
+            "gpt_timer": None,  # Timer for delayed GPT processing
         }
         self.stats["total_calls"] += 1
 
@@ -167,6 +179,7 @@ class VoiceService:
             logger.info(f"  Total chunks: {call_info['audio_chunks']}")
             logger.info(f"  Total bytes: {call_info['bytes_received']}")
             logger.info(f"  Transcriptions: {call_info['transcription_count']}")
+            logger.info(f"  GPT Responses: {call_info['gpt_response_count']}")
 
             # Stop Deepgram stream
             if self.stt_service.is_enabled():
@@ -193,19 +206,123 @@ class VoiceService:
         call_sid = metadata.get("call_sid", "unknown")
         confidence = metadata.get("confidence", 0.0)
         is_final = metadata.get("is_final", False)
+        speech_final = metadata.get("speech_final", False)
 
         # Update transcription count
         if call_sid in self.active_calls:
             self.active_calls[call_sid]["transcription_count"] += 1
 
-        # Log to console (as requested - print transcripts)
-        logger.info(f"[TRANSCRIPT] Text: {transcript}")
+        # Log the transcript
+        logger.info(f"[TRANSCRIPT] CallSid: {call_sid}, Text: '{transcript}', Final: {is_final}, SpeechFinal: {speech_final}, Confidence: {confidence:.2f}")
 
-        # Here you could also:
-        # - Send transcript to RAG service for response generation
-        # - Store transcript in database
-        # - Send to websocket for real-time display
-        # - etc.
+        # Process complete utterances - send to GPT when speech is final OR after collecting final transcripts
+        if is_final and transcript.strip() and call_sid in self.active_calls:
+            # Add to conversation buffer
+            self.active_calls[call_sid]["conversation_buffer"].append(transcript.strip())
+            logger.debug(f"[TRANSCRIPT] Added to buffer. Buffer size: {len(self.active_calls[call_sid]['conversation_buffer'])}")
+
+            # If speech is marked as final, process immediately
+            if speech_final:
+                logger.info(f"[TRANSCRIPT] Speech final detected - processing immediately")
+                # Cancel any pending timer
+                if "gpt_timer" in self.active_calls[call_sid] and self.active_calls[call_sid]["gpt_timer"]:
+                    self.active_calls[call_sid]["gpt_timer"].cancel()
+                    logger.debug(f"[TRANSCRIPT] Cancelled pending timer")
+                
+                # Build the complete user input
+                user_input = " ".join(self.active_calls[call_sid]["conversation_buffer"])
+
+                # Send to GPT and get response
+                await self._process_with_gpt(call_sid, user_input)
+
+                # Clear buffer after processing
+                self.active_calls[call_sid]["conversation_buffer"].clear()
+            else:
+                # Schedule a delayed processing if more transcripts don't arrive
+                logger.debug(f"[TRANSCRIPT] No speech_final - scheduling delayed processing")
+                
+                # Cancel any existing timer
+                if "gpt_timer" in self.active_calls[call_sid] and self.active_calls[call_sid]["gpt_timer"]:
+                    self.active_calls[call_sid]["gpt_timer"].cancel()
+                    logger.debug(f"[TRANSCRIPT] Cancelled existing timer")
+
+                # Create new timer to process after 1.5 seconds of no new transcripts
+                import asyncio
+                async def delayed_process():
+                    try:
+                        logger.debug(f"[TRANSCRIPT] Timer started - waiting 1.5s...")
+                        await asyncio.sleep(1.5)
+                        logger.debug(f"[TRANSCRIPT] Timer expired - checking buffer")
+                        if call_sid in self.active_calls and self.active_calls[call_sid]["conversation_buffer"]:
+                            user_input = " ".join(self.active_calls[call_sid]["conversation_buffer"])
+                            logger.info(f"[TRANSCRIPT] Timer triggered GPT processing for: '{user_input}'")
+                            await self._process_with_gpt(call_sid, user_input)
+                            self.active_calls[call_sid]["conversation_buffer"].clear()
+                        else:
+                            logger.debug(f"[TRANSCRIPT] Timer expired but buffer is empty")
+                    except asyncio.CancelledError:
+                        logger.debug(f"[TRANSCRIPT] Timer cancelled")
+                    except Exception as e:
+                        logger.error(f"[TRANSCRIPT] Error in delayed processing: {e}", exc_info=True)
+
+                self.active_calls[call_sid]["gpt_timer"] = asyncio.create_task(delayed_process())
+                logger.debug(f"[TRANSCRIPT] New timer created")
+
+    async def _process_with_gpt(self, call_sid: str, user_input: str):
+        """
+        Process user input with GPT and log the response.
+
+        Args:
+            call_sid: Call identifier
+            user_input: The user's complete utterance to send to GPT
+        """
+        if not self.gpt_service.is_enabled():
+            logger.warning(f"[GPT] GPT service not available for call {call_sid}")
+            return
+
+        try:
+            logger.info(f"[GPT] Sending to GPT - CallSid: {call_sid}, Input: '{user_input}'")
+
+            # Get conversation history for this call
+            conversation_history = []
+            if call_sid in self.active_calls:
+                conversation_history = self.active_calls[call_sid]["conversation_history"]
+
+            # Get response from GPT service
+            response_text = await self.gpt_service.get_response(
+                user_input=user_input,
+                conversation_history=conversation_history,
+                model="gpt-5-nano",
+                max_completion_tokens=1500,
+                stream=True
+            )
+
+            # Update response count and conversation history
+            if call_sid in self.active_calls:
+                self.active_calls[call_sid]["gpt_response_count"] += 1
+
+                # Add to conversation history
+                self.active_calls[call_sid]["conversation_history"].append(
+                    {"role": "user", "content": user_input}
+                )
+                self.active_calls[call_sid]["conversation_history"].append(
+                    {"role": "assistant", "content": response_text}
+                )
+
+                # Keep only last 10 messages (5 exchanges) to manage context window
+                if len(self.active_calls[call_sid]["conversation_history"]) > 10:
+                    self.active_calls[call_sid]["conversation_history"] = \
+                        self.active_calls[call_sid]["conversation_history"][-10:]
+
+            # Log the complete GPT response (this is the main goal for this phase)
+            logger.info(f"[GPT RESPONSE] CallSid: {call_sid}, Response: '{response_text}'")
+            logger.info(f"[GPT RESPONSE] Length: {len(response_text)} characters")
+
+            # Future: Here we will add TTS and send audio back to the caller
+            # For now, we just log the response
+
+        except Exception as e:
+            logger.error(f"[GPT] Error processing with GPT for call {call_sid}: {e}", exc_info=True)
 
     def get_stats(self) -> dict:
         """Get statistics about the voice service."""

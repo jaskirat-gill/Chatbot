@@ -149,7 +149,7 @@ class STTService:
                 encoding="linear16",  # 16-bit PCM
                 sample_rate=sample_rate,
                 channels=channels,
-                interim_results=False,  # Set to True for partial results
+                interim_results=True,  # Enable interim results to get speech_final events
                 vad_events=True,  # Voice activity detection
             )
 

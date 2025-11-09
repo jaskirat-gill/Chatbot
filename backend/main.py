@@ -13,19 +13,19 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Set specific loggers to INFO level
-logging.getLogger("app.services.voice_service").setLevel(logging.INFO)
-logging.getLogger("app.routes.voice").setLevel(logging.INFO)
-logging.getLogger("app.services.stt_service").setLevel(logging.INFO)
+# Set app-level logger to INFO (all app.* loggers will inherit this)
+logging.getLogger("app").setLevel(logging.INFO)
 
-# Suppress Deepgram SDK internal errors (task cancellation during cleanup is normal)
+# Suppress noisy third-party libraries
 logging.getLogger("deepgram").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
