@@ -29,12 +29,17 @@ class MicrophoneStreamer:
         self.stream = None
         self.is_streaming = False
         self.audio_queue = queue.Queue()
+        self.playback_queue = queue.Queue()
 
         # Audio configuration (matching Twilio's format)
         self.CHUNK = 160  # 20ms of audio at 8kHz
         self.CHANNELS = 1  # Mono
         self.RATE = 8000  # 8kHz sample rate (Twilio uses 8kHz)
         self.DTYPE = np.int16  # 16-bit PCM
+
+        # Playback configuration (for TTS responses)
+        self.PLAYBACK_RATE = 16000  # TTS uses 16kHz
+        self.playback_stream = None
 
         self.chunk_count = 0
         self.start_time = None
@@ -103,11 +108,62 @@ class MicrophoneStreamer:
                 callback=self.audio_callback
             )
 
+            # Setup playback stream for TTS responses
+            default_output = sd.query_devices(kind='output')
+            self.log(f"Using output device: {default_output['name']}")
+
+            self.playback_stream = sd.OutputStream(
+                samplerate=self.PLAYBACK_RATE,
+                channels=self.CHANNELS,
+                dtype=self.DTYPE
+            )
+
             self.log(f"Audio stream configured (rate={self.RATE}Hz, chunk={self.CHUNK})")
+            self.log(f"Playback stream configured (rate={self.PLAYBACK_RATE}Hz)")
             return True
         except Exception as e:
             self.log(f"Audio setup failed: {e}", "ERROR")
             return False
+
+    def play_audio_response(self, audio_data: bytes):
+        """Play audio response through speakers."""
+        try:
+            # Convert bytes to numpy array
+            audio_array = np.frombuffer(audio_data, dtype=self.DTYPE)
+            self.log(f"Playing TTS response ({len(audio_data)} bytes, {len(audio_array)} samples)")
+
+            # Play audio
+            self.playback_stream.write(audio_array)
+            self.log("TTS playback complete")
+        except Exception as e:
+            self.log(f"Error playing audio: {e}", "ERROR")
+
+    async def receive_messages(self):
+        """Receive and handle messages from WebSocket (including TTS responses)."""
+        try:
+            while self.is_streaming:
+                try:
+                    message_text = await asyncio.wait_for(self.ws.recv(), timeout=0.1)
+                    message = json.loads(message_text)
+
+                    event_type = message.get("event")
+                    if event_type == "audio_response":
+                        # Received TTS audio response
+                        audio_b64 = message.get("audio")
+                        if audio_b64:
+                            audio_data = base64.b64decode(audio_b64)
+                            self.log(f"[TTS] Received audio response", "SUCCESS")
+                            # Play the audio
+                            self.play_audio_response(audio_data)
+                    else:
+                        self.log(f"Received message: {event_type}")
+
+                except asyncio.TimeoutError:
+                    continue
+                except websockets.exceptions.ConnectionClosed:
+                    break
+        except Exception as e:
+            self.log(f"Error receiving messages: {e}", "ERROR")
 
     async def stream_audio(self):
         """Stream audio from microphone to WebSocket."""
@@ -115,11 +171,16 @@ class MicrophoneStreamer:
         self.is_streaming = True
         self.start_time = datetime.now()
 
-        # Start the audio stream
+        # Start the audio streams
         self.stream.start()
+        self.playback_stream.start()
         self.log("Audio stream started")
+        self.log("Playback stream started")
 
         try:
+            # Start receiving messages in background
+            receive_task = asyncio.create_task(self.receive_messages())
+
             while self.is_streaming:
                 # Get audio chunk from queue (with timeout to allow checking is_streaming)
                 try:
@@ -160,6 +221,12 @@ class MicrophoneStreamer:
                     max_rms = max(recent_rms) if recent_rms else 0
                     self.log(f"Streamed {self.chunk_count} chunks ({elapsed:.1f}s) | Avg level: {avg_rms:.0f}, Peak: {max_rms:.0f}")
 
+            # Cancel receive task
+            receive_task.cancel()
+            try:
+                await receive_task
+            except asyncio.CancelledError:
+                pass
 
         except KeyboardInterrupt:
             self.log("\nStopping stream (KeyboardInterrupt)...")
@@ -189,6 +256,10 @@ class MicrophoneStreamer:
             self.stream.close()
             self.log("Audio stream closed")
 
+        if self.playback_stream:
+            self.playback_stream.stop()
+            self.playback_stream.close()
+            self.log("Playback stream closed")
 
         # Print summary with audio statistics
         if self.start_time:

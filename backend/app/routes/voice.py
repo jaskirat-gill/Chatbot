@@ -77,7 +77,7 @@ async def websocket_stream(websocket: WebSocket, call_sid: str):
                 logger.info(f"Stream started for call {call_sid}")
                 logger.debug(f"Stream start details: {message}")
                 stream_sid = message.get("streamSid")
-                await voice_service.handle_stream_start(call_sid, stream_sid, message)
+                await voice_service.handle_stream_start(call_sid, stream_sid, message, websocket=websocket)
 
             elif event_type == "media":
                 # Audio data from Twilio (base64 encoded μ-law audio)
@@ -133,7 +133,9 @@ async def local_mic_stream(websocket: WebSocket, call_sid: str):
 
             if event_type == "start":
                 logger.info(f"Local mic stream started for call {call_sid}")
-                await voice_service.handle_stream_start(call_sid, f"local-{call_sid}", message)
+                # Mark websocket as local test for TTS handling
+                websocket._is_local_test = True
+                await voice_service.handle_stream_start(call_sid, f"local-{call_sid}", message, websocket=websocket)
 
             elif event_type == "media":
                 # Audio data from local microphone (already PCM format)

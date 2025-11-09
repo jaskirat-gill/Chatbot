@@ -6,6 +6,7 @@ from datetime import datetime
 from app.config import settings
 from app.services.stt_service import STTService
 from app.services.gpt_service import GPTService
+from app.services.tts_service import TTSService
 
 logger = logging.getLogger(__name__)
 # μ-law decoding table (since audioop was removed in Python 3.13)
@@ -72,7 +73,14 @@ class VoiceService:
         else:
             logger.warning("Voice service initialized without GPT (OpenAI not available)")
 
-    async def handle_stream_start(self, call_sid: str, stream_sid: str, start_message: dict):
+        # Initialize TTS service with Deepgram
+        self.tts_service = TTSService(api_key=settings.deepgram_api_key)
+        if self.tts_service.is_enabled():
+            logger.info("Voice service initialized with Deepgram TTS enabled")
+        else:
+            logger.warning("Voice service initialized without TTS (Deepgram not available)")
+
+    async def handle_stream_start(self, call_sid: str, stream_sid: str, start_message: dict, websocket=None):
         """Handle the start of a media stream."""
         logger.info(f"Stream started - CallSid: {call_sid}, StreamSid: {stream_sid}")
         self.active_calls[call_sid] = {
@@ -87,6 +95,8 @@ class VoiceService:
             "gpt_response_count": 0,  # Track GPT responses
             "conversation_history": [],  # Track conversation for context
             "gpt_timer": None,  # Timer for delayed GPT processing
+            "websocket": websocket,  # WebSocket for sending audio back
+            "is_local": websocket and hasattr(websocket, '_is_local_test'),  # Flag for local testing
         }
         self.stats["total_calls"] += 1
 
@@ -270,7 +280,7 @@ class VoiceService:
 
     async def _process_with_gpt(self, call_sid: str, user_input: str):
         """
-        Process user input with GPT and log the response.
+        Process user input with GPT and send audio response.
 
         Args:
             call_sid: Call identifier
@@ -314,15 +324,80 @@ class VoiceService:
                     self.active_calls[call_sid]["conversation_history"] = \
                         self.active_calls[call_sid]["conversation_history"][-10:]
 
-            # Log the complete GPT response (this is the main goal for this phase)
+            # Log the complete GPT response
             logger.info(f"[GPT RESPONSE] CallSid: {call_sid}, Response: '{response_text}'")
             logger.info(f"[GPT RESPONSE] Length: {len(response_text)} characters")
 
-            # Future: Here we will add TTS and send audio back to the caller
-            # For now, we just log the response
+            # Convert response to speech and send back
+            await self._send_audio_response(call_sid, response_text)
 
         except Exception as e:
             logger.error(f"[GPT] Error processing with GPT for call {call_sid}: {e}", exc_info=True)
+
+    async def _send_audio_response(self, call_sid: str, text: str):
+        """
+        Convert text to speech and send audio back to the caller.
+
+        Args:
+            call_sid: Call identifier
+            text: Text to convert to speech
+        """
+        if not self.tts_service.is_enabled():
+            logger.warning(f"[TTS] TTS service not available for call {call_sid}")
+            return
+
+        if call_sid not in self.active_calls:
+            logger.warning(f"[TTS] Call {call_sid} not found in active calls")
+            return
+
+        try:
+            call_info = self.active_calls[call_sid]
+            websocket = call_info.get("websocket")
+            is_local = call_info.get("is_local", False)
+
+            if not websocket:
+                logger.warning(f"[TTS] No websocket available for call {call_sid}")
+                return
+
+            logger.info(f"[TTS] Generating audio for: '{text[:50]}...' (local={is_local})")
+
+            if is_local:
+                # For local testing, send PCM audio to be played through speakers
+                audio_data = await self.tts_service.synthesize_for_local(text)
+                if audio_data:
+                    # Send as a single message to local client for playback
+                    await websocket.send_json({
+                        "event": "audio_response",
+                        "audio": base64.b64encode(audio_data).decode('utf-8'),
+                        "encoding": "linear16",
+                        "sample_rate": 16000
+                    })
+                    logger.info(f"[TTS] Sent {len(audio_data)} bytes to local client")
+            else:
+                # For Twilio, stream mulaw audio chunks
+                chunk_count = 0
+                async for audio_chunk_base64 in self.tts_service.stream_to_chunks(
+                    text=text,
+                    chunk_size_ms=20,
+                    for_twilio=True
+                ):
+                    chunk_count += 1
+                    # Send media message to Twilio
+                    await websocket.send_json({
+                        "event": "media",
+                        "streamSid": call_info["stream_sid"],
+                        "media": {
+                            "payload": audio_chunk_base64
+                        }
+                    })
+
+                    if chunk_count % 25 == 0:  # Log every 500ms
+                        logger.debug(f"[TTS] Sent {chunk_count} audio chunks to Twilio")
+
+                logger.info(f"[TTS] Sent {chunk_count} audio chunks to Twilio")
+
+        except Exception as e:
+            logger.error(f"[TTS] Error sending audio response for call {call_sid}: {e}", exc_info=True)
 
     def get_stats(self) -> dict:
         """Get statistics about the voice service."""
